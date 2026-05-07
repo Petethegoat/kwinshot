@@ -46,6 +46,15 @@ sudo chmod 644 /usr/local/share/applications/net.local.kwinshot.desktop
 kbuildsycoca6 --noincremental
 ```
 
+## Uninstall
+
+```sh
+./uninstall.sh
+```
+
+This removes `/usr/local/bin/kwinshot` and the installed desktop file, then
+refreshes KDE's service cache.
+
 ## Usage
 
 ```sh
