@@ -1,6 +1,6 @@
 # kwinshot
 
-Fast KWin-native screenshots for KDE Wayland, without Spectacle startup delay.
+Fast KWin-native screenshots for KDE Wayland, without Spectacle startup delay. (see https://bugs.kde.org/show_bug.cgi?id=442876)
 
 `kwinshot` uses a small native Qt selector and KWin's
 `org.kde.KWin.ScreenShot2` API to capture screenshots directly through the
