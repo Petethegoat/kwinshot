@@ -12,6 +12,7 @@
 #include <QGuiApplication>
 #include <QImage>
 #include <QKeyEvent>
+#include <QList>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPalette>
@@ -312,6 +313,27 @@ public:
         return m_frozenBackground;
     }
 
+    bool accepted() const
+    {
+        return m_accepted;
+    }
+
+    Selection selection() const
+    {
+        Selection selection;
+        selection.globalRect = selectedGlobalRect();
+        selection.localRect = selectedLocalRect();
+        selection.screenSize = screenSize();
+        selection.frozenBackground = frozenBackground();
+        return selection;
+    }
+
+    void showSelector()
+    {
+        showFullScreen();
+        raise();
+    }
+
 protected:
     void paintEvent(QPaintEvent *) override
     {
@@ -425,25 +447,48 @@ static QImage cropFrozenSelection(const Selection &selection)
     return background.copy(sourceRect);
 }
 
-static Selection selectRegion(QScreen *screen, bool freeze, const QColor &borderColor, bool debug)
+static Selection selectRegion(bool freeze, const QColor &borderColor, bool debug)
 {
-    QImage background;
-    if (freeze && screen) {
-        background = captureScreen(screen->name(), debug);
+    QList<SelectorWindow *> selectors;
+    const QList<QScreen *> screens = QGuiApplication::screens();
+
+    for (QScreen *screen : screens) {
+        QImage background;
+        if (freeze && screen) {
+            background = captureScreen(screen->name(), debug);
+        }
+
+        auto *selector = new SelectorWindow(screen, background, borderColor);
+        selectors.append(selector);
+        selector->showSelector();
     }
 
-    SelectorWindow selector(screen, background, borderColor);
-    selector.showFullScreen();
-    selector.raise();
-    selector.activateWindow();
-    selector.setFocus();
+    if (selectors.isEmpty()) {
+        return {};
+    }
+
+    QScreen *cursorScreen = QGuiApplication::screenAt(QCursor::pos());
+    SelectorWindow *focusSelector = selectors.first();
+    for (SelectorWindow *selector : selectors) {
+        if (cursorScreen && selector->screen() == cursorScreen) {
+            focusSelector = selector;
+            break;
+        }
+    }
+    focusSelector->activateWindow();
+    focusSelector->setFocus();
 
     qApp->exec();
+
     Selection selection;
-    selection.globalRect = selector.selectedGlobalRect();
-    selection.localRect = selector.selectedLocalRect();
-    selection.screenSize = selector.screenSize();
-    selection.frozenBackground = selector.frozenBackground();
+    for (SelectorWindow *selector : selectors) {
+        if (selector->accepted()) {
+            selection = selector->selection();
+            break;
+        }
+    }
+
+    qDeleteAll(selectors);
     return selection;
 }
 
@@ -554,7 +599,7 @@ int main(int argc, char **argv)
     } else if (config.target == Target::Fullscreen) {
         image = captureScreen(screen ? screen->name() : QString(), config.debug);
     } else {
-        const Selection selection = selectRegion(screen, config.freeze, config.borderColor, config.debug);
+        const Selection selection = selectRegion(config.freeze, config.borderColor, config.debug);
         if (selection.globalRect.isNull()) {
             return 0;
         }

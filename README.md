@@ -11,6 +11,7 @@ compositor.
 - Region screenshots from a frozen current-screen frame by default.
 - Active-window screenshots.
 - Current-screen screenshots.
+- Multi-monitor region selector.
 - Clipboard, file, and stdout output.
 - Theme-aware selection border with an optional color override.
 - KDE shortcut actions for each capture mode.
@@ -118,7 +119,7 @@ and not a local clone from `~/.local/share/applications`.
 - KDE Plasma Wayland only.
 - `fullscreen` currently means the current physical screen, not the whole
   virtual desktop across all monitors.
-- Region selection is currently limited to the screen where it starts.
+- Region selections cannot cross monitor boundaries.
 
 ## License
 
