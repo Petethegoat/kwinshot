@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/d9db2974-d909-44af-84b9-8d45209eb98f
 
 ## Features
 
-- Region screenshots from a frozen current-screen frame by default.
+- Region screenshots from a frozen frame by default.
 - Active-window screenshots.
 - Current-screen screenshots.
 - Multi-monitor region selections.
