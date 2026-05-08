@@ -47,6 +47,15 @@ sudo chmod 644 /usr/local/share/applications/net.local.kwinshot.desktop
 kbuildsycoca6 --noincremental
 ```
 
+## Update
+
+```sh
+./update.sh
+```
+
+This pulls the latest source with `git pull --ff-only` and runs the installer
+again. It refuses to run if the checkout has local changes.
+
 ## Uninstall
 
 ```sh
