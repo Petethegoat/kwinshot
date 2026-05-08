@@ -10,7 +10,9 @@
 #include <QDBusUnixFileDescriptor>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QGuiApplication>
+#include <QIcon>
 #include <QImage>
 #include <QKeyEvent>
 #include <QList>
@@ -19,7 +21,6 @@
 #include <QPalette>
 #include <QProcess>
 #include <QScreen>
-#include <QTemporaryFile>
 #include <QThread>
 #include <QVariantMap>
 #include <QWidget>
@@ -39,13 +40,13 @@ enum class Output {
     Clipboard,
     File,
     Stdout,
-    SpectacleEdit,
+    SaveDialog,
 };
 
 enum class SelectionAction {
     None,
     Clipboard,
-    SpectacleEdit,
+    Save,
 };
 
 struct Config {
@@ -75,6 +76,7 @@ class SelectorWindow;
 struct ActionButton {
     QRect rect;
     QString label;
+    QString iconName;
     SelectionAction action = SelectionAction::None;
 };
 
@@ -258,16 +260,6 @@ static bool writeClipboard(const QByteArray &png)
     return true;
 }
 
-static bool openSpectacleEditor(const QString &filePath)
-{
-    if (!QProcess::startDetached(QStringLiteral("spectacle"), {QStringLiteral("-E"), filePath})) {
-        std::fprintf(stderr, "kwinshot: failed to start spectacle editor\n");
-        return false;
-    }
-
-    return true;
-}
-
 static bool writeOutput(const QImage &image, const Config &config)
 {
     const QByteArray png = imageToPng(image);
@@ -288,24 +280,6 @@ static bool writeOutput(const QImage &image, const Config &config)
         return out.write(png) == png.size();
     }
 
-    if (config.output == Output::SpectacleEdit) {
-        QTemporaryFile file(QDir::tempPath() + QStringLiteral("/kwinshot-XXXXXX.png"));
-        file.setAutoRemove(false);
-        if (!file.open()) {
-            std::fprintf(stderr, "kwinshot: failed to create temporary screenshot file\n");
-            return false;
-        }
-
-        if (file.write(png) != png.size()) {
-            std::fprintf(stderr, "kwinshot: failed to write temporary screenshot file\n");
-            return false;
-        }
-
-        const QString filePath = file.fileName();
-        file.close();
-        return openSpectacleEditor(filePath);
-    }
-
     QFile file(config.filePath);
     if (!file.open(QIODevice::WriteOnly)) {
         std::fprintf(stderr, "kwinshot: failed to open output file: %s\n", qPrintable(config.filePath));
@@ -313,6 +287,25 @@ static bool writeOutput(const QImage &image, const Config &config)
     }
 
     return file.write(png) == png.size();
+}
+
+static bool saveImageWithDialog(const QImage &image)
+{
+    const QString filePath = QFileDialog::getSaveFileName(
+        nullptr,
+        QStringLiteral("Save Screenshot"),
+        QDir::homePath() + QStringLiteral("/Pictures/kwinshot.png"),
+        QStringLiteral("PNG Images (*.png)"));
+    if (filePath.isEmpty()) {
+        return true;
+    }
+
+    if (!image.save(filePath, "PNG")) {
+        std::fprintf(stderr, "kwinshot: failed to save screenshot: %s\n", qPrintable(filePath));
+        return false;
+    }
+
+    return true;
 }
 
 class SelectorWindow : public QWidget
@@ -408,13 +401,10 @@ protected:
         if (m_selectionState->awaitingAction) {
             const SelectionAction action = actionAt(event->position().toPoint());
             if (action != SelectionAction::None) {
-                m_selectionState->action = action;
-                m_selectionState->accepted = true;
-                m_selectionState->awaitingAction = false;
-                hideSelectors();
-                qApp->quit();
+                finishWithAction(action);
                 return;
             }
+            return;
         }
 
         m_selectionState->selecting = true;
@@ -475,12 +465,19 @@ protected:
             return;
         }
 
-        if (m_selectionState->awaitingAction && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
-            m_selectionState->action = SelectionAction::Clipboard;
-            m_selectionState->accepted = true;
-            m_selectionState->awaitingAction = false;
-            hideSelectors();
-            qApp->quit();
+        if (!m_selectionState->awaitingAction) {
+            return;
+        }
+
+        if (event->matches(QKeySequence::Copy)
+            || event->key() == Qt::Key_Return
+            || event->key() == Qt::Key_Enter) {
+            finishWithAction(SelectionAction::Clipboard);
+            return;
+        }
+
+        if (event->matches(QKeySequence::Save)) {
+            finishWithAction(SelectionAction::Save);
             return;
         }
     }
@@ -525,6 +522,15 @@ private:
         }
     }
 
+    void finishWithAction(SelectionAction action)
+    {
+        m_selectionState->action = action;
+        m_selectionState->accepted = true;
+        m_selectionState->awaitingAction = false;
+        hideSelectors();
+        qApp->quit();
+    }
+
     QList<ActionButton> actionButtons() const
     {
         if (!m_selectionState->awaitingAction) {
@@ -537,12 +543,11 @@ private:
         }
 
         const QRect localSelection = globalToLocal(selection);
-        const QFontMetrics metrics(font());
-        const int height = metrics.height() + 16;
+        const QFontMetrics metrics(qApp->font());
+        const int height = qMax(34, metrics.height() + 16);
+        const int buttonWidth = height;
         const int gap = 8;
-        const int clipboardWidth = metrics.horizontalAdvance(QStringLiteral("Clipboard")) + 24;
-        const int annotateWidth = metrics.horizontalAdvance(QStringLiteral("Annotate")) + 24;
-        const int totalWidth = clipboardWidth + gap + annotateWidth;
+        const int totalWidth = buttonWidth * 2 + gap;
         const int x = qBound(12, localSelection.center().x() - totalWidth / 2, qMax(12, width() - totalWidth - 12));
         int y = localSelection.bottom() + 12;
         if (y + height > this->height() - 12) {
@@ -551,8 +556,8 @@ private:
         y = qBound(12, y, qMax(12, this->height() - height - 12));
 
         return {
-            ActionButton{QRect(x, y, clipboardWidth, height), QStringLiteral("Clipboard"), SelectionAction::Clipboard},
-            ActionButton{QRect(x + clipboardWidth + gap, y, annotateWidth, height), QStringLiteral("Annotate"), SelectionAction::SpectacleEdit},
+            ActionButton{QRect(x, y, buttonWidth, height), QStringLiteral("Copy"), QStringLiteral("edit-copy"), SelectionAction::Clipboard},
+            ActionButton{QRect(x + buttonWidth + gap, y, buttonWidth, height), QStringLiteral("Save"), QStringLiteral("document-save"), SelectionAction::Save},
         };
     }
 
@@ -574,7 +579,7 @@ private:
             return;
         }
 
-        QFont font = painter.font();
+        QFont font = qApp->font();
         font.setBold(true);
         painter.setFont(font);
         painter.setRenderHint(QPainter::Antialiasing, true);
@@ -588,8 +593,14 @@ private:
             painter.setPen(QPen(border, 1));
             painter.setBrush(background);
             painter.drawRoundedRect(button.rect, 6, 6);
-            painter.setPen(palette().color(QPalette::WindowText));
-            painter.drawText(button.rect, Qt::AlignCenter, button.label);
+
+            const QIcon icon = QIcon::fromTheme(button.iconName);
+            if (!icon.isNull()) {
+                icon.paint(&painter, button.rect.adjusted(8, 8, -8, -8), Qt::AlignCenter);
+            } else {
+                painter.setPen(palette().color(QPalette::WindowText));
+                painter.drawText(button.rect, Qt::AlignCenter, button.label.left(1));
+            }
         }
 
         painter.setRenderHint(QPainter::Antialiasing, false);
@@ -830,8 +841,8 @@ int main(int argc, char **argv)
         }
 
         if (config.chooseOutput) {
-            if (selection.action == SelectionAction::SpectacleEdit) {
-                config.output = Output::SpectacleEdit;
+            if (selection.action == SelectionAction::Save) {
+                config.output = Output::SaveDialog;
             } else {
                 config.output = Output::Clipboard;
             }
@@ -854,6 +865,13 @@ int main(int argc, char **argv)
             QThread::msleep(uint(config.delayMs));
             QCoreApplication::processEvents();
             image = captureArea(selection.globalRect, config.debug);
+        }
+
+        if (config.output == Output::SaveDialog) {
+            if (image.isNull()) {
+                return 1;
+            }
+            return saveImageWithDialog(image) ? 0 : 1;
         }
     }
 
