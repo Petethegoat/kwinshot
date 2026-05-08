@@ -8,6 +8,7 @@
 #include <QDBusInterface>
 #include <QDBusReply>
 #include <QDBusUnixFileDescriptor>
+#include <QDir>
 #include <QFile>
 #include <QGuiApplication>
 #include <QImage>
@@ -18,6 +19,7 @@
 #include <QPalette>
 #include <QProcess>
 #include <QScreen>
+#include <QTemporaryFile>
 #include <QThread>
 #include <QVariantMap>
 #include <QWidget>
@@ -37,6 +39,13 @@ enum class Output {
     Clipboard,
     File,
     Stdout,
+    SpectacleEdit,
+};
+
+enum class SelectionAction {
+    None,
+    Clipboard,
+    SpectacleEdit,
 };
 
 struct Config {
@@ -45,6 +54,7 @@ struct Config {
     QString filePath;
     bool freeze = true;
     bool debug = false;
+    bool chooseOutput = true;
     int delayMs = 40;
     QColor borderColor;
 };
@@ -57,16 +67,26 @@ struct FrozenScreen {
 struct Selection {
     QRect globalRect;
     QList<FrozenScreen> frozenScreens;
+    SelectionAction action = SelectionAction::None;
 };
 
 class SelectorWindow;
+
+struct ActionButton {
+    QRect rect;
+    QString label;
+    SelectionAction action = SelectionAction::None;
+};
 
 struct SelectionState {
     QPoint startGlobal;
     QPoint currentGlobal;
     QList<SelectorWindow *> windows;
+    bool chooseOutput = true;
     bool selecting = false;
+    bool awaitingAction = false;
     bool accepted = false;
+    SelectionAction action = SelectionAction::None;
 };
 
 static bool readExact(int fd, QByteArray &data, qsizetype size)
@@ -238,6 +258,16 @@ static bool writeClipboard(const QByteArray &png)
     return true;
 }
 
+static bool openSpectacleEditor(const QString &filePath)
+{
+    if (!QProcess::startDetached(QStringLiteral("spectacle"), {QStringLiteral("-E"), filePath})) {
+        std::fprintf(stderr, "kwinshot: failed to start spectacle editor\n");
+        return false;
+    }
+
+    return true;
+}
+
 static bool writeOutput(const QImage &image, const Config &config)
 {
     const QByteArray png = imageToPng(image);
@@ -256,6 +286,24 @@ static bool writeOutput(const QImage &image, const Config &config)
             return false;
         }
         return out.write(png) == png.size();
+    }
+
+    if (config.output == Output::SpectacleEdit) {
+        QTemporaryFile file(QDir::tempPath() + QStringLiteral("/kwinshot-XXXXXX.png"));
+        file.setAutoRemove(false);
+        if (!file.open()) {
+            std::fprintf(stderr, "kwinshot: failed to create temporary screenshot file\n");
+            return false;
+        }
+
+        if (file.write(png) != png.size()) {
+            std::fprintf(stderr, "kwinshot: failed to write temporary screenshot file\n");
+            return false;
+        }
+
+        const QString filePath = file.fileName();
+        file.close();
+        return openSpectacleEditor(filePath);
     }
 
     QFile file(config.filePath);
@@ -347,6 +395,8 @@ protected:
                 painter.drawRect(borderRect);
             }
         }
+
+        drawActionButtons(painter);
     }
 
     void mousePressEvent(QMouseEvent *event) override
@@ -355,8 +405,22 @@ protected:
             return;
         }
 
+        if (m_selectionState->awaitingAction) {
+            const SelectionAction action = actionAt(event->position().toPoint());
+            if (action != SelectionAction::None) {
+                m_selectionState->action = action;
+                m_selectionState->accepted = true;
+                m_selectionState->awaitingAction = false;
+                hideSelectors();
+                qApp->quit();
+                return;
+            }
+        }
+
         m_selectionState->selecting = true;
         m_selectionState->accepted = false;
+        m_selectionState->awaitingAction = false;
+        m_selectionState->action = SelectionAction::None;
         m_selectionState->startGlobal = localToGlobal(event->position().toPoint());
         m_selectionState->currentGlobal = m_selectionState->startGlobal;
         updateSelectors();
@@ -383,16 +447,39 @@ protected:
                                          .normalized()
                                          .adjusted(1, 1, -1, -1);
         m_selectionState->selecting = false;
-        m_selectionState->accepted = finalSelection.width() > 0 && finalSelection.height() > 0;
-        hide();
-        qApp->quit();
+        if (finalSelection.width() <= 0 || finalSelection.height() <= 0) {
+            m_selectionState->accepted = false;
+            hideSelectors();
+            qApp->quit();
+            return;
+        }
+
+        if (!m_selectionState->chooseOutput) {
+            m_selectionState->action = SelectionAction::Clipboard;
+            m_selectionState->accepted = true;
+            hideSelectors();
+            qApp->quit();
+            return;
+        }
+
+        m_selectionState->awaitingAction = true;
+        updateSelectors();
     }
 
     void keyPressEvent(QKeyEvent *event) override
     {
         if (event->key() == Qt::Key_Escape) {
             m_selectionState->accepted = false;
-            hide();
+            hideSelectors();
+            qApp->quit();
+            return;
+        }
+
+        if (m_selectionState->awaitingAction && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
+            m_selectionState->action = SelectionAction::Clipboard;
+            m_selectionState->accepted = true;
+            m_selectionState->awaitingAction = false;
+            hideSelectors();
             qApp->quit();
             return;
         }
@@ -411,7 +498,7 @@ private:
 
     QRect globalSelectionRect() const
     {
-        if (!m_selectionState || (!m_selectionState->selecting && !m_selectionState->accepted)) {
+        if (!m_selectionState || (!m_selectionState->selecting && !m_selectionState->awaitingAction && !m_selectionState->accepted)) {
             return {};
         }
 
@@ -429,6 +516,83 @@ private:
         for (SelectorWindow *window : m_selectionState->windows) {
             window->update();
         }
+    }
+
+    void hideSelectors()
+    {
+        for (SelectorWindow *window : m_selectionState->windows) {
+            window->hide();
+        }
+    }
+
+    QList<ActionButton> actionButtons() const
+    {
+        if (!m_selectionState->awaitingAction) {
+            return {};
+        }
+
+        const QRect selection = globalSelectionRect().intersected(m_screenGeometry);
+        if (selection.isNull()) {
+            return {};
+        }
+
+        const QRect localSelection = globalToLocal(selection);
+        const QFontMetrics metrics(font());
+        const int height = metrics.height() + 16;
+        const int gap = 8;
+        const int clipboardWidth = metrics.horizontalAdvance(QStringLiteral("Clipboard")) + 24;
+        const int annotateWidth = metrics.horizontalAdvance(QStringLiteral("Annotate")) + 24;
+        const int totalWidth = clipboardWidth + gap + annotateWidth;
+        const int x = qBound(12, localSelection.center().x() - totalWidth / 2, qMax(12, width() - totalWidth - 12));
+        int y = localSelection.bottom() + 12;
+        if (y + height > this->height() - 12) {
+            y = localSelection.top() - height - 12;
+        }
+        y = qBound(12, y, qMax(12, this->height() - height - 12));
+
+        return {
+            ActionButton{QRect(x, y, clipboardWidth, height), QStringLiteral("Clipboard"), SelectionAction::Clipboard},
+            ActionButton{QRect(x + clipboardWidth + gap, y, annotateWidth, height), QStringLiteral("Annotate"), SelectionAction::SpectacleEdit},
+        };
+    }
+
+    SelectionAction actionAt(const QPoint &point) const
+    {
+        for (const ActionButton &button : actionButtons()) {
+            if (button.rect.contains(point)) {
+                return button.action;
+            }
+        }
+
+        return SelectionAction::None;
+    }
+
+    void drawActionButtons(QPainter &painter)
+    {
+        const QList<ActionButton> buttons = actionButtons();
+        if (buttons.isEmpty()) {
+            return;
+        }
+
+        QFont font = painter.font();
+        font.setBold(true);
+        painter.setFont(font);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        for (const ActionButton &button : buttons) {
+            QColor background = palette().color(QPalette::Window);
+            background.setAlpha(230);
+            QColor border = m_borderColor;
+            border.setAlpha(240);
+
+            painter.setPen(QPen(border, 1));
+            painter.setBrush(background);
+            painter.drawRoundedRect(button.rect, 6, 6);
+            painter.setPen(palette().color(QPalette::WindowText));
+            painter.drawText(button.rect, Qt::AlignCenter, button.label);
+        }
+
+        painter.setRenderHint(QPainter::Antialiasing, false);
     }
 
     QRect m_screenGeometry;
@@ -487,9 +651,10 @@ static QImage cropFrozenSelection(const Selection &selection)
     return image;
 }
 
-static Selection selectRegion(bool freeze, const QColor &borderColor, bool debug)
+static Selection selectRegion(bool freeze, const QColor &borderColor, bool chooseOutput, bool debug)
 {
     SelectionState selectionState;
+    selectionState.chooseOutput = chooseOutput;
     QList<SelectorWindow *> selectors;
     const QList<QScreen *> screens = QGuiApplication::screens();
 
@@ -536,6 +701,7 @@ static Selection selectRegion(bool freeze, const QColor &borderColor, bool debug
     Selection selection;
     if (selectionState.accepted) {
         selection.globalRect = QRect(selectionState.startGlobal, selectionState.currentGlobal).normalized().adjusted(1, 1, -1, -1);
+        selection.action = selectionState.action;
         for (SelectorWindow *selector : selectors) {
             const FrozenScreen frozenScreen = selector->frozenScreen();
             selection.frozenScreens.append(frozenScreen);
@@ -624,9 +790,14 @@ static Config parseConfig(QApplication &app)
 
     if (parser.isSet(fileOption)) {
         config.output = Output::File;
+        config.chooseOutput = false;
         config.filePath = parser.value(fileOption);
     } else if (parser.isSet(stdoutOption)) {
         config.output = Output::Stdout;
+        config.chooseOutput = false;
+    } else if (parser.isSet(clipboardOption)) {
+        config.output = Output::Clipboard;
+        config.chooseOutput = false;
     } else {
         config.output = Output::Clipboard;
     }
@@ -640,7 +811,7 @@ int main(int argc, char **argv)
     QCoreApplication::setApplicationName(QStringLiteral("kwinshot"));
     QCoreApplication::setApplicationVersion(QStringLiteral("0.1.0"));
 
-    const Config config = parseConfig(app);
+    Config config = parseConfig(app);
 
     QScreen *screen = QGuiApplication::screenAt(QCursor::pos());
     if (!screen) {
@@ -653,9 +824,17 @@ int main(int argc, char **argv)
     } else if (config.target == Target::Fullscreen) {
         image = captureScreen(screen ? screen->name() : QString(), config.debug);
     } else {
-        const Selection selection = selectRegion(config.freeze, config.borderColor, config.debug);
+        const Selection selection = selectRegion(config.freeze, config.borderColor, config.chooseOutput, config.debug);
         if (selection.globalRect.isNull()) {
             return 0;
+        }
+
+        if (config.chooseOutput) {
+            if (selection.action == SelectionAction::SpectacleEdit) {
+                config.output = Output::SpectacleEdit;
+            } else {
+                config.output = Output::Clipboard;
+            }
         }
 
         if (config.debug) {
