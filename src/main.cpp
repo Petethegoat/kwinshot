@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <cstring>
 
 enum class Target {
     Region,
@@ -91,13 +92,12 @@ struct SelectionState {
     SelectionAction action = SelectionAction::None;
 };
 
-static bool readExact(int fd, QByteArray &data, qsizetype size)
+static bool readExact(int fd, uchar *data, qsizetype size)
 {
-    data.resize(size);
     qsizetype offset = 0;
 
     while (offset < size) {
-        const ssize_t n = read(fd, data.data() + offset, size - offset);
+        const ssize_t n = read(fd, data + offset, size - offset);
         if (n <= 0) {
             return false;
         }
@@ -129,14 +129,46 @@ static QImage imageFromKWinResult(const QVariantMap &results, int readFd, bool d
         return {};
     }
 
-    QByteArray raw;
-    if (!readExact(readFd, raw, qsizetype(stride) * height)) {
-        std::fprintf(stderr, "kwinshot: failed to read screenshot bytes\n");
+    QImage image(width, height, format);
+    if (image.isNull()) {
+        std::fprintf(stderr, "kwinshot: failed to allocate screenshot image\n");
         return {};
     }
 
-    QImage image(reinterpret_cast<const uchar *>(raw.constData()), width, height, stride, format);
-    return image.copy();
+    const qsizetype sourceStride = stride;
+    const qsizetype targetStride = image.bytesPerLine();
+    if (sourceStride == targetStride) {
+        if (!readExact(readFd, image.bits(), targetStride * height)) {
+            std::fprintf(stderr, "kwinshot: failed to read screenshot bytes\n");
+            return {};
+        }
+        return image;
+    }
+
+    if (debug) {
+        std::fprintf(stderr,
+                     "kwinshot: stride mismatch source=%lld target=%lld, reading row by row\n",
+                     static_cast<long long>(sourceStride),
+                     static_cast<long long>(targetStride));
+    }
+
+    QByteArray row;
+    row.resize(sourceStride);
+    const qsizetype copyBytes = qMin(sourceStride, targetStride);
+    for (int y = 0; y < height; ++y) {
+        if (!readExact(readFd, reinterpret_cast<uchar *>(row.data()), sourceStride)) {
+            std::fprintf(stderr, "kwinshot: failed to read screenshot bytes\n");
+            return {};
+        }
+
+        uchar *targetRow = image.scanLine(y);
+        std::memcpy(targetRow, row.constData(), size_t(copyBytes));
+        if (copyBytes < targetStride) {
+            std::memset(targetRow + copyBytes, 0, size_t(targetStride - copyBytes));
+        }
+    }
+
+    return image;
 }
 
 static QDBusInterface screenshotInterface()
