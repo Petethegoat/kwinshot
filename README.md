@@ -86,7 +86,8 @@ The selection border uses your Qt/KDE theme accent or highlight color by
 default. Use `--border-color` to override it for one command.
 
 After selecting a region, use the small selector buttons to copy or save the
-screenshot. `Enter`/`Ctrl+C` copies, and `Ctrl+S` opens the save dialog.
+screenshot. `Enter`/`Ctrl+C` copies, and `Ctrl+S` opens the save dialog. Saving
+from the selector also copies the saved PNG to the clipboard.
 
 Targets:
 

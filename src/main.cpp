@@ -323,6 +323,11 @@ static bool writeOutput(const QImage &image, const Config &config)
 
 static bool saveImageWithDialog(const QImage &image)
 {
+    const QByteArray png = imageToPng(image);
+    if (png.isEmpty()) {
+        return false;
+    }
+
     const QString filePath = QFileDialog::getSaveFileName(
         nullptr,
         QStringLiteral("Save Screenshot"),
@@ -332,9 +337,19 @@ static bool saveImageWithDialog(const QImage &image)
         return true;
     }
 
-    if (!image.save(filePath, "PNG")) {
-        std::fprintf(stderr, "kwinshot: failed to save screenshot: %s\n", qPrintable(filePath));
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly)) {
+        std::fprintf(stderr, "kwinshot: failed to open output file: %s\n", qPrintable(filePath));
         return false;
+    }
+
+    if (file.write(png) != png.size()) {
+        std::fprintf(stderr, "kwinshot: failed to write screenshot: %s\n", qPrintable(filePath));
+        return false;
+    }
+
+    if (!writeClipboard(png)) {
+        std::fprintf(stderr, "kwinshot: saved screenshot, but failed to copy it to clipboard\n");
     }
 
     return true;
